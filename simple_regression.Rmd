@@ -1,0 +1,274 @@
+---
+title: "simple-regression"
+output:
+  md_document:
+    variant: markdown_github
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Simple Regression notebook
+
+## Introduction
+
+To study simple regression models, we make use of a very extense dataset full of tennis matches taken from a [GitHub repository](https://github.com/JeffSackmann/tennis_atp).  This repository gathers ATP Tennis rankings, results, and stats from 1968 to 2018. For every match, we have information about different variables that might impact in the final result: ATP rank of both players, surface type, tournament, effectiveness with first and second service, etc.
+
+A preprocessing in Python was done to create two target variables: who wins the match and the difference in points at the end of the match. Also, new variables were created using information of the last 20 matches prior to the match for each observation and we  variables that are not supposed to be known before the match takes place were removed. All the preprocessing and the column description of the dataset can be found in this  [Jupyter notebook](https://gist.github.com/franloza/7e63d5875a23e310501c48f88f9629a1).
+
+In this experiment, only the difference in points was used as the target variable and not the winner of the match,
+
+<br />
+
+<br />
+
+## Preprocessing
+
+After a descriptive analysis (check descriptive_statistics.md), it was decided that the transformations to apply to the dataset were: 
+  - Set categorical variables as factors in R. 
+  - Create 3 new variables: age difference, rank difference and points difference.
+  - Substitute missing and uncommon values by the mode (in categorical predictors). Wrong and uncommon values may introduce noise in the data and increase the error of our model, so we need to deal with them. The observations with NULL values were drop in the preprocessing done before the experiment, so we only need to replace masked NULLs as strings.
+  - Apply the logarithm of a variable. Looking at the histograms, we can check if a variable is right-skewed. Applying the logarithm can help to reduce this skewness and avoid that few observations have a high influence in the regression.
+  - Centring and scaling. This way, the obtained coefficients of the regression are no longer influenced by the magnitudes of the variables. 
+  - Remove high-leverage points. It is likely to find predictors that are very far away from the rest of the points. To reduce the impact of these observations, we decided to remove the observations that are detected as a high-leverage point using the $\chi^2_p$ distribution with $\alpha$ equal to 0.01.
+  
+In addition, we randomly splitted the dataset into train and test.
+
+These two tasks are done in the custom functions pprepro_pred and splitter_pred, from utils.R
+
+```{r message=FALSE}
+source("SRC/utils.R")
+library(dplyr)
+library(ggfortify)
+library(corrplot)
+library(skimr)
+RawATP = read.csv("INPUT/atp_matches_with_stats_2016_17_no_null.csv")
+returnList = pprepro_pred(RawATP)
+returnList = splitter_pred(returnList$X, returnList$Y)
+```
+
+Note: We removed around 8% of the data set as outliers.
+
+<br />
+
+<br />
+
+
+### First model
+
+In order to create the multilinear model for the difference in points we will start performing the simpliest model. This will give us a starting point. This model will simply use all the predictors available in our dataset therefore given us a first intuition of the predictors that are more useful.
+```{r first-model}
+Xtrain <- returnList$Xtrain
+Ytrain <- returnList$Ytrain
+Xtest <- returnList$Xtest
+Ytest <- returnList$Ytest
+rm(returnList)
+train.original <- cbind(Xtrain, data.frame(Ytrain$diff_points))
+mod <- lm(Ytrain.diff_points ~ ., data = train.original)
+summary(mod)
+```
+
+We wanted to explore the collinearity of the model. To do so we intend to compute the Variance Inflation Factor, which measures how linearly dependent is Xj on the rest of the predictors. However, we can't compute the VIF because we get large coefficients.
+
+Explanation:
+NA as a coefficient in a regression indicates that the variable in question is linearly related to the other variables. In your case, this means that Q3=a×Q1+b×Q2+c for some a,b,c. If this is the case, then there's no unique solution to the regression without dropping one of the variables. Adding Q4 is only going to make matters worse.
+That is becase the draw_size is linearly related with the tourney level, so we will repeat the preprocessing removing the variable draw_size.  
+
+```{r drop-draw-size}
+table(train.original$draw_size, train.original$tourney_level)
+
+# We generate the datasets again without the variable Draw Size, which is linearly
+# dependent with Tourney Level
+returnList = pprepro_pred(RawATP, drop_draw_size=TRUE)
+returnList = splitter_pred(returnList$X, returnList$Y)
+Xtrain <- returnList$Xtrain
+Ytrain <- returnList$Ytrain
+Xtest <- returnList$Xtest
+Ytest <- returnList$Ytest
+rm(returnList)
+train.original <- cbind(Xtrain, data.frame(Ytrain$diff_points))
+mod <- lm(Ytrain.diff_points ~ ., data = train.original)
+car::vif(mod) 
+```
+
+We see in the VIF computation that there are multiple values with a VIF larger than 5, which indicates that there are linear relations among some variables. We decide to explore the correlation of the variables to obtain an insight into these relationships.
+
+```{r corrplot}
+numeric_variables <- unlist(lapply(Xtrain, is.numeric))
+corrplot(cor(Xtrain[,numeric_variables]))
+```
+
+We find several variables highly correlated such as *p1_rank* with *p1_rank_points* or *p1_surface_win_prob_20w* with *p1_win_prob_20w* among others. We decide to apply Principal Component Analysis(PCA) to obtain orthogonal predictors which are no longer correlated. This approach might also increase the power of the model, which is extremely low:
+
+```{r summary-first-model}
+summary(mod)
+```
+
+Looking at the results of this first model we can see that we have many issues. First of all, we have obtained an R2 really low (0,0201), and consequently the prediction power of the model is almost insignificant (assuming that the conditions for a multilinear model to work properly are verified, which is something we have not test yet). Apart from that, we can see that all variables seem to have no impact in the prediction of the response, as all of them have very high p-values. However, we might be suffering from collinearity in the quantiative variables, so there is a chance that lowering the number of predictors will help in this aspect.  Let's try to apply PCA to reduce that number and also a stepwise procedure to select less predictors. The  main objective of both things is to obtain a model with less predictors but all of them significant. 
+
+<br />
+
+<br />
+
+### PCA, stepwise model selection and interactions.
+
+<br />
+
+#### PCA
+
+We will transform the numerical variables to a new dimensional space with PCA to obtain uncorrelated variables. In addition, we will add to this new set of predictors the categorical variables; because it is does not have much sense from a theoretical perspective to include them in the PCA. 
+
+All of this is done inside the function PCA_pred (from utils.R).
+```{r pca}
+returnList <- PCA_pred(Xtrain, Ytrain)
+train.PCA <- returnList$train.PCA
+train.PCA_object <- returnList$train.PCA_object
+rm(returnList)
+
+summary(train.PCA)
+```
+
+With the first 3 components we can explain more than the 50% per cent of the variance of the dataset and with 10 components, more than the 90%.
+If we observe the two first components, we see that the first one differentiates between the position in ranking and the probabilities whereas the second component is capable of grouping variables belonging to either player one or player two. 
+
+```{r autoplot-pca}
+ggplot2::autoplot(train.PCA_object, label = FALSE, loadings.label = TRUE)
+```
+<br />
+
+#### Stepwise model selection
+
+Instead of chosing the first PCs, we will apply Stepwise model selection to those Principal Components. 
+Stepwise selection works by sequentially adding predictors to the model (or removing them, depending on the direction) until a best performing model is found. To compare the different models there two main criteria: AIC and BIC. The selected information criterion in this work is the Bayesian Information Criterion (BIC) as it penalizes complex models, which may improve interpretability.
+
+The custom function stepwise_pred uses the R function MASS::stepAIC to perform Stepwise model selection.
+
+```{r stepwise-pca}
+returnList <- stepwise_pred(train.PCA, BIC=TRUE)
+model.PCA.AIC <- returnList$model.PCA.AIC
+predictors.PCA <- returnList$predictors.PCA
+print(predictors.PCA)
+rm(returnList)
+``` 
+
+<br />
+
+The conclusions we can obtain from the model generated with BIC procedure is that matches that are played in the David Cup or a Grand Slam have a significantly positive influence on the difference in the number of points. This model also tell us that the rest of the variables are not informative enough for our linear model to predict the difference in the number of points. This is a very important result, as it tells us that is going to be very difficult to predict the variable difference in points in terms of our predictors. As we said before, BIC stepwise procedure is not infallible, so there is the possibility that trying a different procedure or performing some transformations on the variables we might obtain a better model with more predictors. But at this point it seems that our predictors are not very good to predict the response variable (the stepwise procedure only selected two factors of one categorical variable as the significant predictors among 24 variables). The other two factors of the variable tourney are discarded as their p-values are very high. At this point we should remind that, for categorical variables in multilinear models, the most common approach is to binarize all the factors of the variable. In different models like decision trees this is not needed, as they do not depend on the magnitudes of the categories, but this is not the case in "quantitative" models. Therefore, it is possible that only some factors of the categorical have an impact while the rest do not. 
+Apart from that, we still have the issue of having a very poor regression coefficient for the model (Radj = 0.028). At this point, if we are not able to elevate this coefficient the problems related with collinearity or model assumptions are almost irrelevant, as the predictions the model will generate will be very poor. In any case, we will continue with the analysis for the sake of this academic exercise.
+
+
+We are now going to apply Stepwise model selection on the original attributes. 
+```{r stepwise-original}
+returnList <- stepwise_pred(train.original, BIC=TRUE)
+model.original.AIC <- returnList$model.PCA.AIC
+predictors.original <- returnList$predictors.PCA
+rm(returnList)
+summary(model.original.AIC)
+print(predictors.original)
+
+
+# Final predictors
+predictors.original <- names(model.original.AIC$coefficients)[2:length(model.original.AIC$coefficients)]
+print(predictors.original)
+
+```
+
+<br />
+
+Once again, the obtained model has no predictive power. **It is now clear that the predictors of this dataset are not suitable to perform regression on the selected output variable.** It does not makes sense to apply constrained regression algorithms such as Ridge or Lasso regression, because they use shrinkage to sacrifice $R^2$ to obtain a more general problem. In any case, in a separate notebook the codes for Ridge and Lasso regression are supplied (constrained-regression.md).
+
+<br />
+
+#### Predictor interactions
+
+What we can do (also for the sake of learning, since the results are not going to improve too much) is to work with predictor interactions. That is, consider multiplications of the original predictors to regress on the output variable. We will create an initial model that predicts the different in points using all the second degree interactions (binary multiplications of variables), and then perform stepwise model selection to find the interactions that create the best model. 
+
+Since this takes too much time. The code is commented, and the final model is imported directly. First with PCA:
+
+```{r interactions-pca}
+
+#model.PCA2 <- lm(Ytrain.diff_points ~ .^2, data = train.PCA)
+#model.PCA.AIC2 <- MASS::stepAIC(model.PCA2, k = 2 , trace = 0, direction = "both")
+
+model.PCA.AIC2 = readRDS("models-with-interactions/model.PCA.AIC2.rds")
+summary(model.PCA.AIC2)
+```
+
+
+<br />
+
+
+Now, with original predictos: 
+```{r interactions-original}
+#model2 <- lm(Ytrain.diff_points ~ .^2,data = train.original)
+
+#model.original.AIC2 <- MASS::stepAIC(model2, k = 2, trace = 0, direction = "both")
+
+model.original.AIC2 = readRDS("models-with-interactions/model.original.AIC2.rds")
+summary(model.original.AIC2)
+```
+
+<br />
+
+<br />
+
+### Model diagnostics
+
+When performing linear regression, it is necessary to validate assumptions of linearity, normality, homoscedasticity and independence. In our case, it does not makes sense since we have not found a final model that satisfies us.
+
+To find a proper model to diagnose, we will use the test set. Why so? Well, in this notebook, we have used the train set to compare the different models, and we will train one of them with a completely independent set. 
+
+```{r fit-with-test}
+testModel <- refit_pred (Xtest, Ytest, predictors.PCA, train.PCA_object, 1)
+summary(testModel)
+```
+
+The diagnostic tools that we are going to use are the following ones:
+  - Linearity: Check if there exists some trend in the residuals by looking at the residuals vs. fitted values plot.
+  - Normality: Do hypothesis testing using Shapiro-Wilk test.
+  - Homoscedasticity: Do hypothesis testing using Breusch-Pagan test and check the scale-location plot to see if there exist trend in the standardized residuals vs fitted values plot.
+  - Independence: Check if there is a presence of autocorrelation in the serial plot of the residuals.
+The significance level for all the hypothesis tests is 0.05.
+
+If some assumptions do not hold, we will repeat the experiment after using some transformations such as Box-Cox or Yeo-Johnson transformations, which may reduce the skewness of the data and make the model to hold the failing assumptions.
+
+```{r model_diagnostics, fig.height=5, results='hide'}
+model_diagnostics(testModel)
+```
+
+The residuals do not seem to follow a clear trend and the serial plot indicates that there is no positive autocorrelation in the residuals. To confirm these assumptions, we used Breusch-Pagan and Durbin-Watson tests, which did not reject the null hypothesis of homoscedasticity and independence.
+
+However, the normality assumption does not hold for our model. Even though we log-transformed the response variable, it still does not follow a normal distribution. In the QQ-plot, we can check that the points do not align with the diagonal line and the Shapiro test rejects the null hypothesis of normality in the residuals.
+
+We apply the Yeo-Jonshon transformation (as we zero values in our response variable) to try to bring the variable closer to a normal distribution instead of using just the logarithm of the variable. In the next figure, we can see that the response variable looks more normal than applying `log(y+1)` to the variable. 
+```{r yeo_johnson_comparison,fig.height=3, fig.width=7}
+# Optimal lambda for Yeo-Johnson
+YJ <- car::powerTransform(lm(RawATP$diff_points ~ 1), family = "yjPower")
+# Yeo-Johnson transformation
+diff_points_yj <- car::yjPower(U = RawATP$diff_points, lambda = YJ$lambda)
+par(mfrow=c(1,2)) 
+hist(Ytrain$diff_points,main = "ln(diff_points+1)",xlab = "Transformed response variable")
+hist(diff_points_yj, main = "yeoJohnson(diff_points)", xlab = "Transformed response variable")
+```
+```{r model_after_diagnostics, messages="hide", fig.show = 'hide', results='hide'}
+# Preprocessing
+returnList = pprepro_pred(RawATP, drop_draw_size=TRUE, log_variables=TRUE, scaling=TRUE, remove_outliers=TRUE, yeo_johnson=TRUE)
+returnList = splitter_pred(returnList$X, returnList$Y)
+Xtrain <- returnList$Xtrain
+Ytrain <- returnList$Ytrain
+Xtest <- returnList$Xtest
+Ytest <- returnList$Ytest
+rm(returnList)
+# Get principal components
+returnList <- PCA_pred(Xtrain, Ytrain)
+train.PCA <- returnList$train.PCA
+train.PCA_object <- returnList$train.PCA_object
+rm(returnList)
+# Fit model in test dataset
+testModelJY <- refit_pred (Xtest, Ytest, predictors.PCA, train.PCA_object, 1)
+summary(testModelJY)
+model_diagnostics(testModelJY)
+```
+After fitting the model with the transformed response variable, normality still does not hold for our model and homoscedasticity does not hold according to Breusch-Pagan test either. Although we improved the adjusted $R^2$ to 0.01673, we decided to keep the previous model as it will yield valid inferences if we increase our sample size according to the central limit theorem.
