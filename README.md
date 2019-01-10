@@ -3,9 +3,9 @@
 This is an exploration of the main techniques used in linear regression.
 
 Notes:
-The main code is the R Markdown simple_regression.Rmd. However, to explore the notebook online, use the simple_regression.md file.
-R version: 3.5.1.
-Packages needed: c("dplyr", "skimr", "ggfortify", "corrplot", "ggplot2", "GGally" and "fitdistrplus").
++ The main code is the R Markdown simple_regression.Rmd. However, to explore the notebook online, use the simple_regression.md file.
++ R version: 3.5.1.
++ Packages needed: c("dplyr", "skimr", "ggfortify", "corrplot", "ggplot2", "GGally" and "fitdistrplus").
 
 <br /> 
 
@@ -33,6 +33,6 @@ Authors:
 
 This problem has been proposed and coded in collaboration with:
 
-+ Francisco JosÈ Lozano Serrano.
++ Francisco Jos√© Lozano Serrano.
 
-+ Diego Su·rez Villena.
++ Diego Su√°rez Villena.
